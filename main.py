@@ -4,9 +4,12 @@ from signup_form import SignUpForm
 from users_db import *
 from chat_message import *
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 # Dictionary to store poll results
 poll_results = defaultdict(lambda: defaultdict(int))  # {poll_question: {option: count}}
+# Dictionary to store events
+user_events = defaultdict(list)  # {date: [event1, event2]}
 
 def main(page: ft.Page):
     page.title = "Cram-Jam"
@@ -59,6 +62,33 @@ def main(page: ft.Page):
         print(f"Vote recorded: {poll_text} - {option}")
         page.update()
 
+    def create_event_click(e):
+        if event_name.value.strip() and event_venue.value.strip() and event_time.value.strip() and event_hub.value.strip():
+            event_message = f"📅 {page.session.get('user')} just added an event:\n" \
+                            f"**{event_name.value}**\n" \
+                            f"Venue: {event_venue.value}\n" \
+                            f"Time: {event_time.value}\n" \
+                            f"Hub: {event_hub.value}\n" \
+                            f"Description: {event_description.value}"
+            page.pubsub.send_all(
+                Message(
+                    user=page.session.get("user"),
+                    text=event_message,
+                    message_type="event_message",
+                )
+            )
+            # Clear input fields
+            event_name.value = ""
+            event_venue.value = ""
+            event_time.value = ""
+            event_hub.value = ""
+            event_description.value = ""
+        page.update()
+
+    def render_event(message: Message):
+        event_text = message.text
+        return ft.Text(event_text, weight=ft.FontWeight.BOLD, size=14, color=ft.colors.GREEN)
+
     def render_poll(message: Message):
         poll_text = message.text
         options = message.attachments
@@ -98,6 +128,8 @@ def main(page: ft.Page):
             )
         elif message.message_type == "poll":
             m = render_poll(message)
+        elif message.message_type == "event_message":
+            m = render_event(message)
         else:
             print(f"Unsupported message type: {message.message_type}")
             return
@@ -105,6 +137,68 @@ def main(page: ft.Page):
         chat.controls.append(m)
         page.update()
 
+    def go_to_calendar(e):
+        page.route = "/calendar"
+        page.update()
+
+    # Calendar Page
+    
+    def calendar_view():
+        def add_event(e):
+            if event_date.value and event_description.value:
+                date = event_date.value
+                description = event_description.value
+                user_events[date].append(description)
+                event_date.value = ""
+                event_description.value = ""
+                update_calendar()
+            page.update()
+
+        def update_calendar():
+            calendar.controls.clear()
+            start_date = datetime.now().replace(day=1)
+            for i in range(30):  # Example: 30 days for a month view
+                date = (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
+                events = "\n".join(user_events[date])
+                calendar.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(date, weight=ft.FontWeight.BOLD),
+                                ft.Text(events, size=12),
+                            ]
+                        ),
+                        border=ft.border.all(1, ft.colors.OUTLINE),
+                        padding=5,
+                        expand=True,
+                    )
+                )
+            page.update()
+
+        event_date = ft.TextField(label="Event Date (YYYY-MM-DD)", width=200)
+        event_description = ft.TextField(label="Event Description", width=300)
+        add_event_button = ft.ElevatedButton(text="Add Event", on_click=add_event)
+
+        # Adjusting GridView to use rows and runs_count if columns is not supported
+        calendar = ft.GridView(
+            expand=True,
+            runs_count=7,  # For 7 items in a row (one for each day of the week)
+            spacing=10,
+            controls=[],
+        )
+
+        update_calendar()
+
+        return ft.Column(
+            [
+                ft.Row([event_date, event_description, add_event_button]),
+                calendar,
+                ft.ElevatedButton("Back to Chat", on_click=lambda e: page.go("/chat")),
+            ],
+            spacing=20,
+        )
+
+    
     # Subscribe to pubsub
     page.pubsub.subscribe(on_message)
 
@@ -137,36 +231,8 @@ def main(page: ft.Page):
         on_click=create_poll_click,
     )
 
-    chat_layout = ft.Column(
-        [
-            ft.Container(
-                content=chat,
-                border=ft.border.all(1, ft.colors.OUTLINE),
-                border_radius=5,
-                padding=10,
-                expand=True,
-            ),
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.icons.FILE_UPLOAD,
-                        tooltip="Upload file",
-                        on_click=lambda e: page.dialog.show(upload_file_dialog),
-                    ),
-                    new_message,
-                    ft.IconButton(
-                        icon=ft.icons.SEND_ROUNDED,
-                        tooltip="Send message",
-                        on_click=send_message_click,
-                    ),
-                ],
-            ),
-            ft.Row(
-                controls=[poll_question, poll_options, create_poll_button],
-                alignment=ft.MainAxisAlignment.CENTER,
-            ),
-        ]
-    )
+
+
 
     # Routes
     def route_change(route):
@@ -193,6 +259,10 @@ def main(page: ft.Page):
             else:
                 page.route = "/"
                 page.update()
+        elif page.route == "/calendar":
+            print("Routing to calendar page")
+            page.clean()
+            page.add(calendar_view())
 
     # *********** Instantiate UI Components ***********
     def handle_signin(user, password):
@@ -215,6 +285,72 @@ def main(page: ft.Page):
 
     signin_UI = SignInForm(handle_signin, go_to_signup)
     signup_UI = SignUpForm(on_signup_success, go_to_signin)
+
+    event_name = ft.TextField(label="Event Name", hint_text="Enter the event name...")
+    event_venue = ft.TextField(label="Venue", hint_text="Enter the venue...")
+    event_time = ft.TextField(label="Time", hint_text="Enter the event time...")
+    event_hub = ft.TextField(label="Hub Name", hint_text="Enter the hub name...")
+    event_description = ft.TextField(label="Description", hint_text="Enter a short description...")
+
+    create_event_button = ft.ElevatedButton(
+        text="Create Event",
+        on_click=create_event_click,
+    )
+
+
+    # Rearrange Create Poll and Create Event UI in a column layout
+    chat_layout = ft.Column(
+        [
+            ft.Container(
+                content=chat,
+                border=ft.border.all(1, ft.colors.OUTLINE),
+                border_radius=5,
+                padding=10,
+                expand=True,
+            ),
+            ft.Row(
+                controls=[
+                    ft.IconButton(
+                        icon=ft.icons.FILE_UPLOAD,
+                        tooltip="Upload file",
+                        on_click=lambda e: page.dialog.show(upload_file_dialog),
+                    ),
+                    new_message,
+                    ft.IconButton(
+                        icon=ft.icons.SEND_ROUNDED,
+                        tooltip="Send message",
+                        on_click=send_message_click,
+                    ),
+                    ft.ElevatedButton(
+                        "View Event Calendar",
+                        on_click=go_to_calendar,
+            ),
+
+                ],
+            ),
+            ft.Column(  # Wrap Poll UI in a column
+                controls=[
+                    ft.Row(controls=[poll_question]),
+                    ft.Row(controls=[poll_options]),
+                    ft.Row(controls=[create_poll_button]),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            ft.Column(  # Wrap Event UI in a column
+                controls=[
+                    ft.Row(controls=[event_name]),
+                    ft.Row(controls=[event_venue]),
+                    ft.Row(controls=[event_time]),
+                    ft.Row(controls=[event_hub]),
+                    ft.Row(controls=[event_description]),
+                    ft.Row(controls=[create_event_button]),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+
+        ]
+    )
+
 
     page.on_route_change = route_change
     page.add(ft.Row([signin_UI], alignment=ft.MainAxisAlignment.CENTER))
